@@ -1,1 +1,18 @@
+Introduction
+In this assignment you have to implement a UNIX shell using C. Your shell will be able to run basic linux commands, I/O redirections and handle errors.
 
+Specifications:
+The shell must implement the following core features:
+1. Display a command prompt (e.g., sh> ) and read user input.
+2. Parse and execute system commands.
+For example, running “pwd” will output the absolute path of the directory that your shell is working on.
+Hint: Use “fork” and “exec” system call
+3. Support input (<) and output (> and >>) redirection.
+Hint: Use “dup” and “dup2”
+4. Support command piping (|). Your shell should support any number of piping.
+For example, “command1 | command2 | command3 | command4” should work
+5. Support multiple commands in-line separated by semicolon (;)
+6. Support multiple command in sequence using (&&)
+7. Support history of executed commands
+8. Support signal handling. Pressing CTRL+C should terminate the currently running command inside your shell, not your shell.
+Hint: Use “signal” and “sigaction”
