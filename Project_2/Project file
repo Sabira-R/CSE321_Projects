@@ -1,0 +1,373 @@
+#include <stdio.h>
+#include <stdint.h>
+#include <stdlib.h>
+#include <string.h>
+
+#define BLOCK_SIZE 4096
+#define TOTAL_BLOCKS 64
+#define INODE_COUNT 64
+#define DATA_BLOCK_COUNT 56  // Not actively used in this code.
+#define INODE_SIZE 256
+
+#define SUPERBLOCK_BLOCK 0
+#define INODE_BITMAP_BLOCK 1
+#define DATA_BITMAP_BLOCK 2
+#define INODE_TABLE_START 3
+#define INODE_TABLE_END 7
+#define FIRST_DATA_BLOCK 8
+
+#define IMG_NAME "vsfs.img"
+
+#pragma pack(push, 1)
+typedef struct {
+    uint16_t magic_number;
+    uint32_t block_size;
+    uint32_t total_blocks;
+    uint32_t inode_bitmap_block;
+    uint32_t data_bitmap_block;
+    uint32_t inode_table_start;
+    uint32_t first_data_block;
+    uint32_t inode_size;
+    uint32_t inode_count;
+    uint8_t reserved[4058];
+} Superblock;
+
+typedef struct {
+    uint32_t mode;
+    uint32_t uid;
+    uint32_t gid;
+    uint32_t size;
+    uint32_t atime;
+    uint32_t ctime;
+    uint32_t mtime;
+    uint32_t dtime;
+    uint32_t links_count;
+    uint32_t block_count;
+    uint32_t direct_block;
+    uint32_t indirect_block;
+    uint32_t double_indirect;
+    uint32_t triple_indirect;
+    uint8_t reserved[156];
+} Inode;
+#pragma pack(pop)
+
+uint8_t inode_bitmap[INODE_COUNT];
+uint8_t data_bitmap[TOTAL_BLOCKS];
+Inode inodes[INODE_COUNT];
+
+/* Helper function to get a specific bit from the bitmap */
+int get_bit(uint8_t* bitmap, int index) {
+    return (bitmap[index / 8] >> (index % 8)) & 1;
+}
+
+/* Read a full block from the image */
+void read_block(FILE* img, int block_num, void* buffer) {
+    fseek(img, block_num * BLOCK_SIZE, SEEK_SET);
+    fread(buffer, BLOCK_SIZE, 1, img);
+}
+
+/* Load the superblock from the image file */
+void load_superblock(FILE* img, Superblock* sb) {
+    uint8_t raw[BLOCK_SIZE];
+    read_block(img, SUPERBLOCK_BLOCK, raw);
+    memcpy(sb, raw, sizeof(Superblock));
+}
+
+/* Check various values of the superblock */
+void check_superblock(Superblock* sb) {
+    printf("=== Superblock Check ===\n");
+    printf("  %s Magic number: 0x%x\n", sb->magic_number == 0xd34d ? "✅" : "❌", sb->magic_number);
+    printf("  %s Block size: %u\n", sb->block_size == BLOCK_SIZE ? "✅" : "❌", sb->block_size);
+    printf("  %s Total blocks: %u\n", sb->total_blocks == TOTAL_BLOCKS ? "✅" : "❌", sb->total_blocks);
+    printf("  %s Inode bitmap block: %u\n", sb->inode_bitmap_block == INODE_BITMAP_BLOCK ? "✅" : "❌", sb->inode_bitmap_block);
+    printf("  %s Data bitmap block: %u\n", sb->data_bitmap_block == DATA_BITMAP_BLOCK ? "✅" : "❌", sb->data_bitmap_block);
+    printf("  %s Inode table start: %u\n", sb->inode_table_start == INODE_TABLE_START ? "✅" : "❌", sb->inode_table_start);
+    printf("  %s First data block: %u\n", sb->first_data_block == FIRST_DATA_BLOCK ? "✅" : "❌", sb->first_data_block);
+    printf("  %s Inode size: %u\n", sb->inode_size == INODE_SIZE ? "✅" : "❌", sb->inode_size);
+    printf("  %s Inode count: %u\n", sb->inode_count == INODE_COUNT ? "✅" : "❌", sb->inode_count);
+}
+
+/* Load bitmaps and inodes from the image into memory */
+void load_bitmaps_and_inodes(FILE* img) {
+    uint8_t raw_block[BLOCK_SIZE];
+
+    // Load inode bitmap
+    read_block(img, INODE_BITMAP_BLOCK, raw_block);
+    for (int i = 0; i < INODE_COUNT; i++) {
+        inode_bitmap[i] = get_bit(raw_block, i);
+    }
+
+    // Load data bitmap. Note: We only consider blocks from FIRST_DATA_BLOCK to TOTAL_BLOCKS.
+    read_block(img, DATA_BITMAP_BLOCK, raw_block);
+    for (int i = FIRST_DATA_BLOCK; i < TOTAL_BLOCKS; i++) {
+        data_bitmap[i] = get_bit(raw_block, i);
+    }
+
+    // Load inodes from the inode table blocks
+    uint8_t inode_block[BLOCK_SIZE];
+    int inode_index = 0;
+    for (int block = INODE_TABLE_START; block <= INODE_TABLE_END; block++) {
+        read_block(img, block, inode_block);
+        for (int offset = 0; offset < BLOCK_SIZE; offset += INODE_SIZE) {
+            if (inode_index >= INODE_COUNT) break;
+            memcpy(&inodes[inode_index], &inode_block[offset], INODE_SIZE);
+            inode_index++;
+        }
+    }
+}
+
+/* Check inode bitmap consistency */
+void inode_bitmap_consistency(int fix_mode) {
+    printf("\n=== Inode Bitmap Consistency Check ===\n");
+    for (int i = 0; i < INODE_COUNT; i++) {
+        int valid = (inodes[i].links_count > 0 && inodes[i].dtime == 0);
+        if (inode_bitmap[i] != valid) {
+            printf("  ❌ Inode %d inconsistency: bitmap says %d, actual valid: %d\n", i, inode_bitmap[i], valid);
+            if (fix_mode) {
+                inode_bitmap[i] = valid;
+                printf("    ✅ Fixed inode bitmap for inode %d\n", i);
+            }
+        }
+    }
+    printf("  ✅ Inode bitmap checked.\n");
+}
+
+
+//Check Data Bitmap Consistancy (direct and single indirect pointers)
+
+void data_bitmap_consistency(FILE* img, int fix_mode) {
+    printf("\n=== Data Bitmap Consistency Check ===\n");
+
+    int block_usage[TOTAL_BLOCKS] = {0};  //koybar blk use hoise
+
+    for (int i = 0; i < INODE_COUNT; i++) {
+        if (!(inodes[i].links_count > 0 && inodes[i].dtime == 0)) //check korche inode gulo file a ache naki ,use a na thkle skip er jnno marked
+            continue;
+           
+           
+    // Check direct block pointer
+        uint32_t blk = inodes[i].direct_block;  //diect blk pointer k nicche
+        if (blk != 0) {   //inode has direct valid blk
+            if (blk < FIRST_DATA_BLOCK || blk >= TOTAL_BLOCKS) {   //then valid range a ase naki
+                printf("  ❌ Bad block in inode %d: %u\n", i, blk);
+                if (fix_mode) {
+                    inodes[i].direct_block = 0;  //invalid direct block pointer k shoray, 0 boshacche
+                    printf("    ✅ Cleared invalid direct block pointer in inode %d\n", i);
+                }
+            } else {
+                block_usage[blk]++;
+            }
+        }
+
+// Handle indirect block pointer
+        uint32_t indirect = inodes[i].indirect_block;
+        if (indirect != 0) {
+            if (indirect < FIRST_DATA_BLOCK || indirect >= TOTAL_BLOCKS) {
+                printf("  ❌ Bad indirect block pointer in inode %d: %u\n", i, indirect);
+                if (fix_mode) {
+                    inodes[i].indirect_block = 0;
+                    printf("    ✅ Cleared invalid indirect block pointer in inode %d\n", i);
+                }
+            } else {
+                block_usage[indirect]++;
+
+// Read and validate the indirect block
+                uint8_t indirect_block_data[BLOCK_SIZE];
+                fseek(img, indirect * BLOCK_SIZE, SEEK_SET);
+                fread(indirect_block_data, BLOCK_SIZE, 1, img);
+
+                uint32_t* pointers = (uint32_t*)indirect_block_data;
+                int modified = 0;
+                for (int j = 0; j < BLOCK_SIZE / sizeof(uint32_t); j++) {
+                    uint32_t ptr = pointers[j];
+                    if (ptr == 0) continue;
+                    if (ptr < FIRST_DATA_BLOCK || ptr >= TOTAL_BLOCKS) {
+                        printf("  ❌ Inode %d: Indirect pointer %d out of bounds: %u\n", i, j, ptr);
+                        if (fix_mode) {
+                            pointers[j] = 0;
+                            modified = 1;
+                        }
+                    } else {
+                        block_usage[ptr]++;
+                    }
+                }
+// Write back fixed indirect block if modified.
+                if (fix_mode && modified) {
+                    fseek(img, indirect * BLOCK_SIZE, SEEK_SET);
+                    fwrite(indirect_block_data, BLOCK_SIZE, 1, img);
+                    printf("    ✅ Fixed invalid pointers in indirect block %u\n", indirect);
+                }
+            }
+        }
+    }
+
+
+// Check for any inconsistencies between block usage and the bitmap.
+    for (int i = FIRST_DATA_BLOCK; i < TOTAL_BLOCKS; i++) {
+        if (data_bitmap[i] && block_usage[i] == 0) {
+            printf("  ❌ Block %d marked used in bitmap but not referenced by any inode\n", i);
+            if (fix_mode) {
+                data_bitmap[i] = 0;
+                printf("    ✅ Cleared bitmap for block %d\n", i);
+            }
+        }
+        if (!data_bitmap[i] && block_usage[i] > 0) {
+            printf("  ❌ Block %d is used by inode(s) but not marked in bitmap\n", i);
+            if (fix_mode) {
+                data_bitmap[i] = 1;
+                printf("    ✅ Set bitmap for block %d\n", i);
+            }
+        }
+        if (block_usage[i] > 1) {
+            printf("  ❌ Block %d is referenced by multiple inodes (%d times)\n", i, block_usage[i]);
+            if (fix_mode) {
+                // For duplicate blocks, clear all but the first reference.
+                int found = 0;
+                for (int j = 0; j < INODE_COUNT; j++) {
+                    if (!(inodes[j].links_count > 0 && inodes[j].dtime == 0))
+                        continue;
+                   
+                    if (inodes[j].direct_block == i) {
+                        if (found) {
+                            inodes[j].direct_block = 0;
+                            printf("    ✅ Cleared duplicate reference to block %d in inode %d\n", i, j);
+                        } else {
+                            found = 1;
+                        }
+                    }
+                   
+                    if (inodes[j].indirect_block == i) {
+                        if (found) {
+                            inodes[j].indirect_block = 0;
+                            printf("    ✅ Cleared duplicate reference to block %d in inode %d (indirect)\n", i, j);
+                        } else {
+                            found = 1;
+                        }
+                    }
+                   
+// Also check indirect pointers within indirect blocks.
+                    if (inodes[j].indirect_block != 0 &&
+                        inodes[j].indirect_block >= FIRST_DATA_BLOCK &&
+                        inodes[j].indirect_block < TOTAL_BLOCKS) {
+                       
+                        uint8_t indirect_block_data[BLOCK_SIZE];
+                        fseek(img, inodes[j].indirect_block * BLOCK_SIZE, SEEK_SET);
+                        fread(indirect_block_data, BLOCK_SIZE, 1, img);
+                       
+                        uint32_t* pointers = (uint32_t*)indirect_block_data;
+                        int modified = 0;
+                        for (int k = 0; k < BLOCK_SIZE / sizeof(uint32_t); k++) {
+                            if (pointers[k] == i) {
+                                if (found) {
+                                    pointers[k] = 0;
+                                    modified = 1;
+                                    printf("    ✅ Cleared duplicate reference to block %d in inode %d (indirect ptr %d)\n", i, j, k);
+                                } else {
+                                    found = 1;
+                                }
+                            }
+                        }
+                        if (modified && fix_mode) {
+                            fseek(img, inodes[j].indirect_block * BLOCK_SIZE, SEEK_SET);
+                            fwrite(indirect_block_data, BLOCK_SIZE, 1, img);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    printf("  ✅ Data block consistency verified.\n");
+}
+
+/* Print inode and data bitmaps to the console */
+void print_bitmaps() {
+    printf("\n=== Inode Bitmap ===\n");
+    for (int i = 0; i < INODE_COUNT; i++) {
+        printf("  Inode %02d: %d\n", i, inode_bitmap[i]);
+    }
+
+    printf("\n=== Data Bitmap ===\n");
+    for (int i = FIRST_DATA_BLOCK; i < TOTAL_BLOCKS; i++) {
+        printf("  Block %02d: %d\n", i, data_bitmap[i]);
+    }
+}
+
+/* Write the inode bitmap back to the image */
+void write_inode_bitmap(FILE* img) {
+    uint8_t block[BLOCK_SIZE] = {0};
+    for (int i = 0; i < INODE_COUNT; i++) {
+        if (inode_bitmap[i])
+            block[i / 8] |= (1 << (i % 8));
+    }
+    fseek(img, INODE_BITMAP_BLOCK * BLOCK_SIZE, SEEK_SET);
+    fwrite(block, BLOCK_SIZE, 1, img);
+}
+
+/* Write the data bitmap back to the image */
+void write_data_bitmap(FILE* img) {
+    uint8_t block[BLOCK_SIZE] = {0};
+    for (int i = FIRST_DATA_BLOCK; i < TOTAL_BLOCKS; i++) {
+        if (data_bitmap[i])
+            block[i / 8] |= (1 << (i % 8));
+    }
+    fseek(img, DATA_BITMAP_BLOCK * BLOCK_SIZE, SEEK_SET);
+    fwrite(block, BLOCK_SIZE, 1, img);
+}
+
+/* Write inodes back into the inode table area of the image */
+void write_inodes(FILE* img) {
+    uint8_t inode_block[BLOCK_SIZE];
+    int inode_index = 0;
+    for (int block = INODE_TABLE_START; block <= INODE_TABLE_END; block++) {
+        memset(inode_block, 0, BLOCK_SIZE);
+        for (int offset = 0; offset < BLOCK_SIZE; offset += INODE_SIZE) {
+            if (inode_index >= INODE_COUNT) break;
+            memcpy(&inode_block[offset], &inodes[inode_index], INODE_SIZE);
+            inode_index++;
+        }
+        fseek(img, block * BLOCK_SIZE, SEEK_SET);
+        fwrite(inode_block, BLOCK_SIZE, 1, img);
+    }
+}
+
+//Main function
+int main(int argc, char* argv[]) {
+    int fix_mode = (argc > 1 && strcmp(argv[1], "--fix") == 0);
+    if (fix_mode) {
+        printf("🛠 Running in FIX mode...\n");
+    }
+
+    FILE* img = fopen(IMG_NAME, fix_mode ? "r+b" : "rb");
+    if (!img) {
+        perror("Error opening vsfs.img");
+        return 1;
+    }
+
+    // Load and validate the superblock
+    Superblock sb;
+    load_superblock(img, &sb);
+    check_superblock(&sb);
+
+    // Load bitmaps and inode table
+    load_bitmaps_and_inodes(img);
+
+    // Check and fix inode bitmap consistency if necessary
+    inode_bitmap_consistency(fix_mode);
+
+    // Check and fix data bitmap consistency
+    data_bitmap_consistency(img, fix_mode);
+
+    // Print current bitmap states
+    print_bitmaps();
+
+    // Write updated bitmaps and inodes back to disk if in fix mode
+    if (fix_mode) {
+        write_inode_bitmap(img);
+        write_data_bitmap(img);
+        write_inodes(img);
+        printf("\n✅ All fixes have been applied to %s\n", IMG_NAME);
+    }
+
+    fclose(img);
+    return 0;
+}
