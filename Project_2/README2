@@ -18,6 +18,7 @@ Your objectives are to:
 2. Identify all inconsistencies and structural issues.
 3. Fix the detected errors to restore the file system’s integrity.
 4. Ensure that the corrected file system image is error-free when re-checked with your tool
+
 File System Layout
 ● Block size: 4096 Bytes
 ● Total blocks: 64
@@ -56,7 +57,9 @@ Inode Structure
 ● Double Indirect block pointer: 4 Bytes
 ● Triple Indirect block pointer: 4 Bytes
 ● Reserved: 156 Bytes
+
 Features
+
 1. Superblock Validator
 Verifies:
 a. Magic number (must be 0xd34d)
@@ -71,11 +74,14 @@ Verifies:
 a. Every block marked used in the data bitmap is actually referenced by a valid
 inode
 b. Every block referenced by an inode is marked as used in the data bitmap
+
 3. Inode Bitmap Consistency Checker
 Verifies:
 a. Each bit set in the inode bitmap corresponds to a valid inode
 (Hint: An inode is valid if its number of link is greater than 0 and delete time is set
 to 0)
 b. Conversely, every such inode is marked as used in the bitmap
+
 4. Duplicate Checker detects blocks referenced by multiple inodes
+
 5. Bad block checker detects blocks with indices outside valid range
